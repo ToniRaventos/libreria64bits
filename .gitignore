@@ -1,0 +1,32 @@
+# Binarios y salidas
+Win32/
+Win64/
+Debug/
+Release/
+*.exe
+*.dll
+*.bpl
+*.dcu
+*.o
+*.obj
+*.res
+
+# Archivos locales del IDE
+*.local
+*.cbproj.local
+*.dproj.local
+*.groupproj.local
+*.identcache
+*.stat
+*.tvsconfig
+*.skincfg
+
+# Backups
+*~
+*.~*
+*.bak
+
+# Historial y caché
+__history/
+__recovery/
+*.log
