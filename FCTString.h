@@ -15,6 +15,7 @@
  #include <Vcl.h>
 #endif
 
+
 #ifdef _WIN32
  #include <tchar.h>
 #else
@@ -31,11 +32,12 @@
 #include <string>
 #include <algorithm>
 
-//#ifdef _CHART
+
+#ifdef _CHART
 using CharT = wchar_t;
-//#else
-//using CharT = char;
-//#endif
+#else
+using CharT = char;
+#endif
 
 // Helpers sueltos (no forman parte de la clase)
 size_t Buffer_Size(const char* bf);

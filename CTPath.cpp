@@ -39,20 +39,21 @@ CTPath::CTPath(const std::string& pathfilename)
 
 void CTPath::SetPath(const std::string& pathfilename)
 {
-    std::error_code ec;
-
     const fs::path p(pathfilename);
 
-    // Ruta tal cual se pasó.
     pathFileName = p.string();
 
-    // Ruta absoluta normalizada. Si falla, dejamos la original.
-    fs::path absPath = fs::absolute(p, ec);
-    pathAbsolut = ec ? p.string() : absPath.string();
+    // Ruta absoluta sin usar fs::absolute.
+    fs::path absPath;
+    if (p.is_absolute()) {
+        absPath = p;
+    } else {
+        std::error_code ec;
+        fs::path cwd = fs::current_path(ec);
+        absPath = ec ? p : (cwd / p);
+    }
+    pathAbsolut = absPath.string();
 
-    // Directorio contenedor.
     directory = p.parent_path().string();
-
-    // Nombre del fichero (sin directorio).
-    fileName = p.filename().string();
+    fileName  = p.filename().string();
 }
