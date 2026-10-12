@@ -38,6 +38,14 @@ struct CTTimestamp
 // Alias histórico
 typedef CTTimestamp TIMESTAMP_STRUCT_TRC;
 
+
+std::wstring utf8_to_wstring(const std::string &s);
+inline int cmp_i_char(char a, char b);
+inline int cmp_i_wchar(wchar_t a, wchar_t b);
+std::string wstring_to_utf8(const std::wstring &w);
+inline void append_utf16(std::wstring& out, char32_t cp);
+
+
 //---------------------------------------------------------------------------
 // Cadenas: mayúsculas / minúsculas
 //---------------------------------------------------------------------------
@@ -227,7 +235,6 @@ std::wstring StringToWString(const std::string& str);
 //---------------------------------------------------------------------------
 std::string RGBtoHTML(int r, int g, int b);
 std::string RGBtoHTML(int rgb);
-
 
 
 #endif // GeneralH

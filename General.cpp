@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
 //===========================================================================
 // Helpers internos (namespace anónimo)
 //===========================================================================
-namespace {
+
 
 // --- UTF-8 <-> wstring (UTF-16 en Windows, UTF-32 en otras plataformas) ---
 
@@ -39,81 +39,102 @@ inline void append_utf16(std::wstring& out, char32_t cp)
     }
 }
 
-std::wstring utf8_to_wstring(const char* s)
-{
-    std::wstring out;
-    if (!s) return out;
-
-    const unsigned char* p = reinterpret_cast<const unsigned char*>(s);
-    while (*p)
+ std::string wstring_to_utf8(const std::wstring &w)
     {
-        char32_t cp = 0;
-        int extra = 0;
+        std::string out;
+        out.reserve(w.size() * 2);
 
-        if      (*p < 0x80)            { cp = *p++; }
-        else if ((*p & 0xE0) == 0xC0)  { cp = *p++ & 0x1F; extra = 1; }
-        else if ((*p & 0xF0) == 0xE0)  { cp = *p++ & 0x0F; extra = 2; }
-        else if ((*p & 0xF8) == 0xF0)  { cp = *p++ & 0x07; extra = 3; }
-        else                           { ++p; continue; }
+        for (std::size_t i = 0; i < w.size(); ++i) {
+            char32_t cp = 0;
 
-        bool ok = true;
-        for (int i = 0; i < extra; ++i)
-        {
-            if ((*p & 0xC0) != 0x80) { ok = false; break; }
-            cp = (cp << 6) | (*p++ & 0x3F);
-        }
-        if (!ok) continue;
-
-        append_utf16(out, cp);
-    }
-    return out;
-}
-
-std::string wstring_to_utf8(const wchar_t* s)
-{
-    std::string out;
-    if (!s) return out;
-
-    for (std::size_t i = 0; s[i] != 0; ++i)
-    {
-        char32_t cp = static_cast<char32_t>(static_cast<std::uint16_t>(s[i]));
-
-        if constexpr (sizeof(wchar_t) == 2)
-        {
-            if (cp >= 0xD800 && cp <= 0xDBFF && s[i + 1] != 0)
-            {
-                char32_t lo = static_cast<char32_t>(
-                                  static_cast<std::uint16_t>(s[i + 1]));
-                if (lo >= 0xDC00 && lo <= 0xDFFF)
-                {
-                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                    ++i;
+            if constexpr (sizeof(wchar_t) == 2) {
+                cp = static_cast<char32_t>(static_cast<std::uint16_t>(w[i]));
+                if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < w.size()) {
+                    char32_t lo = static_cast<char32_t>(
+                        static_cast<std::uint16_t>(w[i + 1]));
+                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        ++i;
+                    }
                 }
+            } else {
+                cp = static_cast<char32_t>(w[i]);
+            }
+
+            if (cp < 0x80)
+                out.push_back(static_cast<char>(cp));
+            else if (cp < 0x800) {
+                out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            } else if (cp < 0x10000) {
+                out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            } else {
+                out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
             }
         }
-
-        if      (cp < 0x80)    out.push_back(static_cast<char>(cp));
-        else if (cp < 0x800)   {
-            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        }
-        else if (cp < 0x10000) {
-            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        }
-        else {
-            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        }
+        return out;
     }
-    return out;
+
+    std::wstring utf8_to_wstring(const std::string &s)
+    {
+        std::wstring out;
+        out.reserve(s.size());
+
+        const unsigned char* p =
+            reinterpret_cast<const unsigned char*>(s.data());
+        const unsigned char* end = p + s.size();
+
+        while (p < end) {
+            char32_t cp = 0;
+            int extra = 0;
+
+            if (*p < 0x80)
+                cp = *p++;
+            else if ((*p & 0xE0) == 0xC0) {
+                cp = *p++ & 0x1F;
+                extra = 1;
+            } else if ((*p & 0xF0) == 0xE0) {
+                cp = *p++ & 0x0F;
+                extra = 2;
+            } else if ((*p & 0xF8) == 0xF0) {
+                cp = *p++ & 0x07;
+                extra = 3;
+            } else {
+                ++p;
+                continue;
+            }
+
+            bool ok = true;
+            for (int i = 0; i < extra; ++i) {
+                if (p >= end || (*p & 0xC0) != 0x80) {
+                    ok = false;
+                    break;
+                }
+                cp = (cp << 6) | (*p++ & 0x3F);
+            }
+            if (!ok)
+                continue;
+
+            if constexpr (sizeof(wchar_t) == 2) {
+                if (cp <= 0xFFFF)
+                    out.push_back(static_cast<wchar_t>(cp));
+                else {
+                    cp -= 0x10000;
+                    out.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
+                    out.push_back(static_cast<wchar_t>(0xDC00 + (cp & 0x3FF)));
+                }
+            } else {
+                out.push_back(static_cast<wchar_t>(cp));
+            }
+        }
+        return out;
 }
-
 // --- Comparadores case-insensitive carácter a carácter ---
-
 inline int cmp_i_char(char a, char b)
 {
     int ca = std::toupper(static_cast<unsigned char>(a));
@@ -128,7 +149,7 @@ inline int cmp_i_wchar(wchar_t a, wchar_t b)
     return (ca < cb) ? -1 : (ca > cb) ? 1 : 0;
 }
 
-} // namespace
+
 
 //===========================================================================
 // Mayúsculas / minúsculas

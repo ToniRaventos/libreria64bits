@@ -4,7 +4,7 @@
 #include "TSqlTable.h"
 #include "General.h"
 #include "FCTLogger.h"
-
+#include "General.h"
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -22,106 +22,6 @@
 //===========================================================================
 // Helpers internos de conversión UTF-8 <-> UTF-16
 //===========================================================================
-namespace
-{
-
-    std::string wstring_to_utf8(const std::wstring &w)
-    {
-        std::string out;
-        out.reserve(w.size() * 2);
-
-        for (std::size_t i = 0; i < w.size(); ++i) {
-            char32_t cp = 0;
-
-            if constexpr (sizeof(wchar_t) == 2) {
-                cp = static_cast<char32_t>(static_cast<std::uint16_t>(w[i]));
-                if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < w.size()) {
-                    char32_t lo = static_cast<char32_t>(
-                        static_cast<std::uint16_t>(w[i + 1]));
-                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                        ++i;
-                    }
-                }
-            } else {
-                cp = static_cast<char32_t>(w[i]);
-            }
-
-            if (cp < 0x80)
-                out.push_back(static_cast<char>(cp));
-            else if (cp < 0x800) {
-                out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-            } else if (cp < 0x10000) {
-                out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-            } else {
-                out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-                out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-            }
-        }
-        return out;
-    }
-
-    std::wstring utf8_to_wstring(const std::string &s)
-    {
-        std::wstring out;
-        out.reserve(s.size());
-
-        const unsigned char* p =
-            reinterpret_cast<const unsigned char*>(s.data());
-        const unsigned char* end = p + s.size();
-
-        while (p < end) {
-            char32_t cp = 0;
-            int extra = 0;
-
-            if (*p < 0x80)
-                cp = *p++;
-            else if ((*p & 0xE0) == 0xC0) {
-                cp = *p++ & 0x1F;
-                extra = 1;
-            } else if ((*p & 0xF0) == 0xE0) {
-                cp = *p++ & 0x0F;
-                extra = 2;
-            } else if ((*p & 0xF8) == 0xF0) {
-                cp = *p++ & 0x07;
-                extra = 3;
-            } else {
-                ++p;
-                continue;
-            }
-
-            bool ok = true;
-            for (int i = 0; i < extra; ++i) {
-                if (p >= end || (*p & 0xC0) != 0x80) {
-                    ok = false;
-                    break;
-                }
-                cp = (cp << 6) | (*p++ & 0x3F);
-            }
-            if (!ok)
-                continue;
-
-            if constexpr (sizeof(wchar_t) == 2) {
-                if (cp <= 0xFFFF)
-                    out.push_back(static_cast<wchar_t>(cp));
-                else {
-                    cp -= 0x10000;
-                    out.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
-                    out.push_back(static_cast<wchar_t>(0xDC00 + (cp & 0x3FF)));
-                }
-            } else {
-                out.push_back(static_cast<wchar_t>(cp));
-            }
-        }
-        return out;
-    }
-
-} // namespace
 
 //===========================================================================
 // Ciclo de vida
@@ -175,6 +75,7 @@ void CTSqlTable::Close(bool /*borra*/)
 
     rowProceed.clear();
     RowStat.clear();
+    bindLengths_.clear();
     Limpiar();
     isOpen = false;
 }
@@ -272,12 +173,19 @@ void CTSqlTable::CreateFields(bool binds)
                 dataType == SQL_LONGVARBINARY);
 
         const bool tamanoGrande =
-            f.ColumnSizePtr > lazyThreshold_ &&
-            (dataType == SQL_CHAR || dataType == SQL_VARCHAR ||
-                dataType == SQL_WCHAR || dataType == SQL_WVARCHAR ||
-                dataType == SQL_BINARY || dataType == SQL_VARBINARY);
+            (f.ColumnSizePtr > lazyThreshold_ &&
+                (dataType == SQL_CHAR || dataType == SQL_VARCHAR ||
+                    dataType == SQL_WCHAR || dataType == SQL_WVARCHAR ||
+                    dataType == SQL_BINARY || dataType == SQL_VARBINARY)) ||
+            (f.ColumnSizePtr == 0 &&
+                (dataType == SQL_WCHAR || dataType == SQL_WVARCHAR));
 
-        if (ROW_SIZE == 1 && (tipoGrande || tamanoGrande)) {
+        // Regla:
+        //   - binds == false → TODAS las columnas van a Lazy (SQLGetData).
+        //     Esto evita mezclar SQLBindCol y SQLGetData, que el driver
+        //     de SQL Server no tolera bien.
+        //   - binds == true  → solo las LOBs van a Lazy; el resto se bindea.
+        if (!binds || (ROW_SIZE == 1 && (tipoGrande || tamanoGrande))) {
             f.Lazy = true;
             f.ColumnSizePtr = 0;
             f.Buffer.clear();
@@ -298,7 +206,6 @@ void CTSqlTable::CreateFields(bool binds)
                     f.Longitud.data());
             }
         }
-
         Index[static_cast<std::size_t>(i)].Campo = f.NombreCampo;
         Index[static_cast<std::size_t>(i)].Fl = &f;
     }
@@ -327,6 +234,8 @@ void CTSqlTable::VerificaTipus(
         case SQL_WVARCHAR:
         case SQL_WLONGVARCHAR:
             *SqlTipus = SQL_C_WCHAR;
+            if (*size == 0)
+                return;
             if (*size > static_cast<std::size_t>(MAX_LEN_CHAR))
                 *size = static_cast<std::size_t>(MAX_LEN_CHAR);
             *size = (*size * sizeof(wchar_t)) + sizeof(wchar_t);
@@ -414,24 +323,36 @@ bool CTSqlTable::ReadLazyField(ColSql &f, int row)
             break;
         }
 
+        // 1) Calcular cuántos BYTES del buffer hay que copiar.
+        //    El driver de SQL Server devuelve `indicator` en CARACTERES
+        //    cuando el tipo es SQL_C_WCHAR. Multiplicamos por sizeof(wchar_t).
         std::size_t n = CHUNK;
-        if (indicator != SQL_NO_TOTAL && indicator >= 0 &&
-            static_cast<std::size_t>(indicator) < CHUNK)
-        {
-            n = static_cast<std::size_t>(indicator);
+        if (indicator != SQL_NO_TOTAL && indicator >= 0) {
+            const std::size_t elemsz =
+                (f.Type == SQL_C_WCHAR) ? sizeof(wchar_t) : 1;
+            const std::size_t bytes =
+                static_cast<std::size_t>(indicator) * elemsz;
+            n = (bytes < CHUNK) ? bytes : CHUNK;
         }
 
-        if (f.Type == SQL_C_CHAR && n > 0 && buf[n - 1] == '\0')
-            --n;
-        else if (f.Type == SQL_C_WCHAR && n >= sizeof(wchar_t) &&
-                 *reinterpret_cast<wchar_t*>(
-                     buf.data() + n - sizeof(wchar_t)) == L'\0')
-            n -= sizeof(wchar_t);
+        // 2) Quitar el terminador nulo si el driver lo añadió al final.
+        //    Solo se quita UN terminador, nunca más.
+        if (f.Type == SQL_C_CHAR) {
+            if (n > 0 && buf[n - 1] == '\0')
+                --n;
+        } else if (f.Type == SQL_C_WCHAR) {
+            if (n >= sizeof(wchar_t) &&
+                *reinterpret_cast<wchar_t*>(buf.data() + n - sizeof(wchar_t)) ==
+                    L'\0')
+                n -= sizeof(wchar_t);
+        }
 
+        // 3) Añadir el bloque al cache.
         if (n > 0)
             f.LazyCache.insert(f.LazyCache.end(), buf.begin(), buf.begin() + n);
         f.LazyLen = static_cast<SQLLEN>(f.LazyCache.size());
 
+        // 4) Si SQL_SUCCESS, ya está todo. Si SQL_SUCCESS_WITH_INFO, hay más.
         if (rc == SQL_SUCCESS)
             break;
 
@@ -439,6 +360,7 @@ bool CTSqlTable::ReadLazyField(ColSql &f, int row)
             buf.data(), static_cast<SQLLEN>(CHUNK), &indicator);
     }
 
+    // 5) Añadir terminador nulo final (por seguridad, para C-strings).
     if (f.Type == SQL_C_CHAR)
         f.LazyCache.push_back('\0');
     else if (f.Type == SQL_C_WCHAR) {
@@ -513,6 +435,7 @@ int CTSqlTable::Execute(int maxrow)
     if (maxrow > 0)
         Limpiar();
     CreateFields();
+    GetMatriz();
     return 1;
 }
 
@@ -558,6 +481,18 @@ int CTSqlTable::ExecuteSql()
 
 //===========================================================================
 // Call
+//---------------------------------------------------------------------------
+// Ejecuta el SQL y trae hasta `maxrow` filas usando SQLExtendedFetch con
+// cursor KEYSET_DRIVEN. Las columnas normales se bindean con SQLBindCol.
+//
+// IMPORTANTE: este método NO puede leer columnas LOB (SQL_WLONGVARCHAR,
+// SQL_WVARCHAR con ColumnSize=0, SQL_LONGVARBINARY) porque el driver
+// ODBC de SQL Server no permite mezclar SQLBindCol y SQLGetData.
+//
+// Para leer LOBs usa CallSingle().
+//
+// Uso típico: Call(2), Call(5), Call(100) para leer múltiples filas
+// sin LOBs.
 //===========================================================================
 int CTSqlTable::Call(int maxrow)
 {
@@ -607,6 +542,89 @@ int CTSqlTable::Call(int maxrow)
 
     isOpen = true;
     CallGetMatrix();
+    return 1;
+}
+
+//===========================================================================
+// CallSingle
+//---------------------------------------------------------------------------
+// Ejecuta el SQL y trae UNA sola fila usando SQLFetch con cursor
+// FORWARD_ONLY. NO se bindea ninguna columna: todas se leen bajo demanda
+// con SQLGetData (modo Lazy).
+//
+// Permite leer columnas LOB (JSON, XML, NVARCHAR(MAX), VARBINARY(MAX))
+// sin límite de tamaño y sin reservar buffers gigantes.
+//
+// Uso típico: SPs que devuelven 1 fila con columnas LOB.
+//===========================================================================
+int CTSqlTable::CallSingle()
+{
+    if (!hstmt) {
+        Open();
+        if (!hstmt)
+            return 0;
+    }
+
+    ROW_SIZE = 1;
+
+    hihaError = false;
+    SQLCancel(hstmt);
+
+    rowProceed.assign(1, 0);
+    RowStat.assign(1, 0);
+
+    SQLSetStmtAttr(hstmt, SQL_ATTR_CONCURRENCY,
+        reinterpret_cast<SQLPOINTER>(
+            static_cast<std::intptr_t>(SQL_CONCUR_READ_ONLY)),
+        0);
+
+    // Cursor FORWARD_ONLY: obligatorio para SQLGetData
+    SQLSetStmtAttr(hstmt, SQL_ATTR_CURSOR_TYPE,
+        reinterpret_cast<SQLPOINTER>(
+            static_cast<std::intptr_t>(SQL_CURSOR_FORWARD_ONLY)),
+        0);
+
+    SQLSetStmtAttr(hstmt, SQL_ATTR_ROW_ARRAY_SIZE,
+        reinterpret_cast<SQLPOINTER>(static_cast<std::intptr_t>(1)), 0);
+
+    SQLSetStmtAttr(
+        hstmt, SQL_ATTR_ROW_STATUS_PTR, RowStat.data(), SQL_IS_POINTER);
+    SQLSetStmtAttr(
+        hstmt, SQL_ATTR_ROW_OPERATION_PTR, rowProceed.data(), SQL_IS_POINTER);
+
+    if (DB != nullptr)
+        DB->SendMsgDebuger(this);
+
+    retcode = SQLExecDirectA(hstmt,
+        reinterpret_cast<SQLCHAR*>(const_cast<char*>(Sql.c_str())),
+        static_cast<SQLINTEGER>(Sql.size()));
+
+    if (retcode != SQL_SUCCESS && retcode != SQL_SUCCESS_WITH_INFO &&
+        retcode != SQL_NO_DATA)
+    {
+        hihaError = true;
+        DisplayError();
+        return 0;
+    }
+
+    isOpen = true;
+
+    // Describir columnas SIN SQLBindCol (CreateFields(false)).
+    // Con Lazy=true en las LOBs, no hace falta bind. Y así SQLGetData
+    // tiene vía libre.
+    Limpiar();
+    fRowCount = 0;
+    fSelected = -1;
+    CreateFields(/*binds=*/false);
+
+    // SQLFetch simple. Con FORWARD_ONLY, SQLGetData funciona.
+    const RETCODE fetchRc = SQLFetch(hstmt);
+    if (fetchRc == SQL_SUCCESS || fetchRc == SQL_SUCCESS_WITH_INFO) {
+        fRowCount = 1;
+        fSelected = 0;
+        InvalidarLazyCache();
+    }
+
     return 1;
 }
 
@@ -1681,6 +1699,7 @@ int CTSqlTable::Copy(std::string &txt, wchar_t* bf, int ll)
 bool CTSqlTable::Prepare(const std::wstring &sql)
 {
     Close();
+    bindLengths_.clear();
     if (!DB || !DB->hdbc)
         return false;
 
@@ -1718,33 +1737,61 @@ bool CTSqlTable::Bind(int paramIndex, SQLSMALLINT paramType, SQLSMALLINT cType,
     }
     return true;
 }
-
 bool CTSqlTable::BindInt(int index, int& value)
 {
-    static thread_local SQLLEN len = sizeof(int);
+    const std::size_t idx = static_cast<std::size_t>(index);
+
+    // Asegurar que el vector tiene espacio para este índice.
+    if (bindLengths_.size() <= idx)
+        bindLengths_.resize(idx + 1, 0);
+
+    // Cada parámetro tiene su propio SQLLEN.
+    bindLengths_[idx] = static_cast<SQLLEN>(sizeof(int));
+
     return Bind(index, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_INTEGER,
-                sizeof(int), 0, &value, sizeof(int), &len);
+                sizeof(int), 0,
+                &value,
+                sizeof(int),
+                &bindLengths_[idx]);
 }
 
 bool CTSqlTable::BindWString(int index, const std::wstring& value)
 {
-    // OJO: value debe vivir hasta ExecutePrepared.
-    static thread_local SQLLEN len = 0;
-    len = static_cast<SQLLEN>(value.size() * sizeof(wchar_t));
+    const std::size_t idx = static_cast<std::size_t>(index);
+
+    if (bindLengths_.size() <= idx)
+        bindLengths_.resize(idx + 1, 0);
+
+    // Longitud en bytes (no en wchar_t).
+    bindLengths_[idx] =
+        static_cast<SQLLEN>(value.size() * sizeof(wchar_t));
+
     return Bind(index, SQL_PARAM_INPUT, SQL_C_WCHAR, SQL_WVARCHAR,
                 static_cast<SQLULEN>(value.size()), 0,
                 const_cast<wchar_t*>(value.c_str()),
-                static_cast<SQLLEN>(value.size() * sizeof(wchar_t)), &len);
+                static_cast<SQLLEN>(value.size() * sizeof(wchar_t)),
+                &bindLengths_[idx]);
 }
 
 bool CTSqlTable::BindString(int index, const std::string& value)
 {
-    static thread_local SQLLEN len = 0;
-    len = static_cast<SQLLEN>(value.size());
+    const std::size_t idx = static_cast<std::size_t>(index);
+
+    // Reservar capacidad por adelantado para que resize() no reasigne
+    // y los punteros a bindLengths_ sean estables.
+    if (bindLengths_.capacity() < 50)
+        bindLengths_.reserve(50);
+
+    if (bindLengths_.size() <= idx)
+        bindLengths_.resize(idx + 1, 0);
+
+    bindLengths_[idx] = static_cast<SQLLEN>(value.size());
+
     return Bind(index, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
                 static_cast<SQLULEN>(value.size()), 0,
                 const_cast<char*>(value.c_str()),
-                static_cast<SQLLEN>(value.size()), &len);
+                static_cast<SQLLEN>(value.size()),
+                &bindLengths_[idx]);
 }
 bool CTSqlTable::ExecutePrepared(int maxrow)
 {
@@ -1760,23 +1807,63 @@ bool CTSqlTable::ExecutePrepared(int maxrow)
     rowProceed.assign(static_cast<std::size_t>(ROW_SIZE), 0);
     RowStat.assign(static_cast<std::size_t>(ROW_SIZE), 0);
 
+    // ─── Bifurcación por ROW_SIZE ──────────────────────────────
+    // ROW_SIZE == 1 → cursor FORWARD_ONLY, SQLFetch simple,
+    //                 CreateFields(false) → todo Lazy.
+    //                 Necesario para leer LOBs con SQLGetData.
+    //
+    // ROW_SIZE > 1  → cursor KEYSET_DRIVEN, SQLExtendedFetch,
+    //                 CreateFields(true) → bind para columnas cortas.
+    //                 Rápido para muchas filas sin LOBs.
+    // ───────────────────────────────────────────────────────────
+
+    if (ROW_SIZE == 1) {
+        // --- Modo "una fila con LOBs" ---
+        SQLSetStmtAttr(hstmt, SQL_ATTR_CURSOR_TYPE,
+            reinterpret_cast<SQLPOINTER>(
+                static_cast<std::intptr_t>(SQL_CURSOR_FORWARD_ONLY)),
+            0);
+    } else {
+        // --- Modo "N filas sin LOBs" ---
+        SQLSetStmtAttr(hstmt, SQL_ATTR_CURSOR_TYPE,
+            reinterpret_cast<SQLPOINTER>(
+                static_cast<std::intptr_t>(SQL_CURSOR_KEYSET_DRIVEN)),
+            0);
+    }
+
     SQLSetStmtAttr(hstmt, SQL_ATTR_ROW_ARRAY_SIZE,
         reinterpret_cast<SQLPOINTER>(static_cast<std::intptr_t>(ROW_SIZE)), 0);
-    SQLSetStmtAttr(
-        hstmt, SQL_ATTR_ROW_STATUS_PTR, RowStat.data(), SQL_IS_POINTER);
-    SQLSetStmtAttr(
-        hstmt, SQL_ATTR_ROW_OPERATION_PTR, rowProceed.data(), SQL_IS_POINTER);
+    SQLSetStmtAttr(hstmt, SQL_ATTR_ROW_STATUS_PTR,
+        RowStat.data(), SQL_IS_POINTER);
+    SQLSetStmtAttr(hstmt, SQL_ATTR_ROW_OPERATION_PTR,
+        rowProceed.data(), SQL_IS_POINTER);
 
     retcode = SQLExecute(hstmt);
 
-    if (retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO) {
-        isOpen = true;
-        CallGetMatrix();
-        return true;
+    if (retcode != SQL_SUCCESS && retcode != SQL_SUCCESS_WITH_INFO) {
+        DisplayError();
+        return false;
     }
 
-    DisplayError();
-    return false;
+    isOpen = true;
+
+    if (ROW_SIZE == 1) {
+        // Modo una fila: CreateFields sin binds (todo Lazy) + SQLFetch.
+        CreateFields(/*binds=*/false);
+
+        const RETCODE fetchRc = SQLFetch(hstmt);
+        if (fetchRc == SQL_SUCCESS || fetchRc == SQL_SUCCESS_WITH_INFO) {
+            fRowCount = 1;
+            fSelected = 0;
+            InvalidarLazyCache();
+        }
+    } else {
+        // Modo N filas: CreateFields con binds + CallGetMatrix.
+        CreateFields(/*binds=*/true);
+        CallGetMatrix();
+    }
+
+    return true;
 }
 
 bool CTSqlTable::CallProcedure(

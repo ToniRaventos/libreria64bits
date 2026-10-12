@@ -109,6 +109,7 @@ class CTSqlTable : public CTSTD
     int fSelected;
     RETCODE retcode;
     bool hihaError;
+    std::vector<SQLLEN> bindLengths_;
 
     void CreateFields(bool bind = true);
     void Limpiar();
@@ -119,7 +120,7 @@ class CTSqlTable : public CTSTD
 
     int Sort(Index_Cursor* values, int start, int end_list);
     ColSql* Find(const CTString &sub1);
-    std::string GetErrorSQL();
+
     void VerificaTipus(int tipus, short int* SqlTipus, std::size_t* size);
 
     bool EnsureConnected();
@@ -165,13 +166,14 @@ class CTSqlTable : public CTSTD
     int GetMatriz();
     int CallGetMatrix();
     int Call(int maxrow = 1);
+    int CallSingle();
 
     int Recno();
     int Goto(int selec);
     bool Rollback();
     bool Commit();
     int Update(int _eof);
-
+    std::string GetErrorSQL();
     void ActiveErrors(bool act);
     void DisplayError();
 
